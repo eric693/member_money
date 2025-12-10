@@ -6,6 +6,7 @@ from datetime import datetime
 import os
 from typing import Optional
 from dotenv import load_dotenv
+import calendar
 
 # 載入 .env 文件
 load_dotenv()
@@ -27,57 +28,60 @@ BANK_INFO = {
 }
 
 # ============ 商城商品配置 ============
-# 商品格式: "商品名稱": {"price": 價格, "description": "描述", "category": "分類", "stock": 庫存(-1=無限)}
 SHOP_ITEMS = {
     "陪玩1小時": {
         "price": 200,
         "description": "專業陪玩1小時，提供語音服務",
         "category": "陪玩服務",
-        "stock": -1,  # -1 表示無限庫存
-        "emoji": "🎮"
+        "stock": -1,
+        "emoji": "🎮",
+        "commission_rate": 0.70
     },
     "傳說上分1星": {
         "price": 150,
         "description": "專業代練，保證上分到傳說",
         "category": "代練服務",
         "stock": -1,
-        "emoji": "⭐"
+        "emoji": "⭐",
+        "commission_rate": 0.70
     },
     "代儲1000鑽": {
         "price": 280,
         "description": "遊戲內代儲1000鑽石",
         "category": "代儲服務",
         "stock": -1,
-        "emoji": "💎"
+        "emoji": "💎",
+        "commission_rate": 0.70
     },
     "客製服務": {
         "price": 500,
         "description": "客製化服務，請在購買後說明需求",
         "category": "客製服務",
         "stock": -1,
-        "emoji": "✨"
+        "emoji": "✨",
+        "commission_rate": 0.70
     },
     "VIP會員月卡": {
         "price": 1000,
         "description": "VIP會員30天，享有專屬優惠",
         "category": "會員服務",
         "stock": -1,
-        "emoji": "👑"
+        "emoji": "👑",
+        "commission_rate": 0.00
     }
 }
 
-# 工作人員角色 ID（需要在 Discord 伺服器中設置）
-# 格式: "分類": 角色ID
+# 工作人員角色 ID
 STAFF_ROLES = {
-    "陪玩服務": 1041668052909035612,  # 替換為實際的角色 ID，例如: 1234567890
+    "陪玩服務": 1041668052909035612,
     "代練服務": 1041668052909035612,
     "代儲服務": 1041668052909035612,
     "客製服務": 1041668052909035612,
     "會員服務": 1041668052909035612
 }
 
-# 通知頻道 ID（需要設置）
-NOTIFICATION_CHANNEL_ID = 1448290873031917701  # 替換為實際的頻道 ID
+# 通知頻道 ID
+NOTIFICATION_CHANNEL_ID = 1448290873031917701
 
 # 初始化 Bot
 intents = discord.Intents.default()
@@ -91,7 +95,6 @@ def init_database():
     conn = sqlite3.connect('wallet.db')
     cursor = conn.cursor()
     
-    # 用戶錢包表
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS wallets (
             user_id INTEGER PRIMARY KEY,
@@ -101,7 +104,6 @@ def init_database():
         )
     ''')
     
-    # 消費紀錄表
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS transactions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -114,7 +116,6 @@ def init_database():
         )
     ''')
     
-    # 儲值紀錄表
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS deposits (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -127,7 +128,6 @@ def init_database():
         )
     ''')
     
-    # 儲值申請表
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS deposit_requests (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -145,7 +145,6 @@ def init_database():
         )
     ''')
     
-    # 商品表
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS shop_items (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -156,11 +155,11 @@ def init_database():
             stock INTEGER DEFAULT -1,
             emoji TEXT,
             enabled INTEGER DEFAULT 1,
+            commission_rate REAL DEFAULT 0.70,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
     
-    # 訂單表
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS orders (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -176,26 +175,42 @@ def init_database():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             completed_at TIMESTAMP,
             staff_id INTEGER,
+            commission_rate REAL DEFAULT 0.70,
+            staff_earning REAL DEFAULT 0,
+            platform_fee REAL DEFAULT 0,
+            commission_paid INTEGER DEFAULT 0,
             FOREIGN KEY (user_id) REFERENCES wallets (user_id)
         )
     ''')
     
-    # 初始化商品（如果表為空）
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS commissions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            order_number TEXT NOT NULL,
+            staff_id INTEGER NOT NULL,
+            staff_name TEXT NOT NULL,
+            order_amount REAL NOT NULL,
+            commission_rate REAL NOT NULL,
+            staff_earning REAL NOT NULL,
+            platform_fee REAL NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (order_number) REFERENCES orders (order_number)
+        )
+    ''')
+    
     cursor.execute('SELECT COUNT(*) FROM shop_items')
     if cursor.fetchone()[0] == 0:
         for name, info in SHOP_ITEMS.items():
             cursor.execute('''
-                INSERT INTO shop_items (name, price, description, category, stock, emoji)
-                VALUES (?, ?, ?, ?, ?, ?)
-            ''', (name, info["price"], info["description"], info["category"], info["stock"], info["emoji"]))
+                INSERT INTO shop_items (name, price, description, category, stock, emoji, commission_rate)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''', (name, info["price"], info["description"], info["category"], 
+                  info["stock"], info["emoji"], info["commission_rate"]))
     
     conn.commit()
     conn.close()
 
-# ============ 資料庫操作函數 ============
-
 def create_wallet(user_id: int, username: str):
-    """創建用戶錢包"""
     conn = sqlite3.connect('wallet.db')
     cursor = conn.cursor()
     try:
@@ -209,7 +224,6 @@ def create_wallet(user_id: int, username: str):
         conn.close()
 
 def get_balance(user_id: int) -> Optional[float]:
-    """獲取用戶餘額"""
     conn = sqlite3.connect('wallet.db')
     cursor = conn.cursor()
     cursor.execute('SELECT balance FROM wallets WHERE user_id = ?', (user_id,))
@@ -218,7 +232,6 @@ def get_balance(user_id: int) -> Optional[float]:
     return result[0] if result else None
 
 def update_balance(user_id: int, amount: float, transaction_type: str, description: str = ""):
-    """更新用戶餘額並記錄交易"""
     conn = sqlite3.connect('wallet.db')
     cursor = conn.cursor()
     
@@ -247,39 +260,39 @@ def update_balance(user_id: int, amount: float, transaction_type: str, descripti
         conn.close()
 
 def get_shop_items(enabled_only=True):
-    """獲取商品列表"""
     conn = sqlite3.connect('wallet.db')
     cursor = conn.cursor()
     if enabled_only:
-        cursor.execute('SELECT name, price, description, category, stock, emoji FROM shop_items WHERE enabled = 1')
+        cursor.execute('SELECT name, price, description, category, stock, emoji, commission_rate FROM shop_items WHERE enabled = 1')
     else:
-        cursor.execute('SELECT name, price, description, category, stock, emoji FROM shop_items')
+        cursor.execute('SELECT name, price, description, category, stock, emoji, commission_rate FROM shop_items')
     results = cursor.fetchall()
     conn.close()
     return results
 
 def get_shop_item(item_name: str):
-    """獲取單個商品資訊"""
     conn = sqlite3.connect('wallet.db')
     cursor = conn.cursor()
-    cursor.execute('SELECT name, price, description, category, stock, emoji FROM shop_items WHERE name = ? AND enabled = 1', (item_name,))
+    cursor.execute('SELECT name, price, description, category, stock, emoji, commission_rate FROM shop_items WHERE name = ? AND enabled = 1', (item_name,))
     result = cursor.fetchone()
     conn.close()
     return result
 
-def create_order(user_id: int, username: str, item_name: str, item_price: float, quantity: int, note: str = ""):
-    """創建訂單"""
+def create_order(user_id: int, username: str, item_name: str, item_price: float, quantity: int, commission_rate: float, note: str = ""):
     conn = sqlite3.connect('wallet.db')
     cursor = conn.cursor()
     try:
-        # 生成訂單號
         order_number = f"ORD{datetime.now().strftime('%Y%m%d%H%M%S')}{user_id % 1000:03d}"
         total_price = item_price * quantity
+        staff_earning = total_price * commission_rate
+        platform_fee = total_price - staff_earning
         
         cursor.execute('''
-            INSERT INTO orders (order_number, user_id, username, item_name, item_price, quantity, total_price, note)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (order_number, user_id, username, item_name, item_price, quantity, total_price, note))
+            INSERT INTO orders (order_number, user_id, username, item_name, item_price, quantity, 
+                               total_price, note, commission_rate, staff_earning, platform_fee)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (order_number, user_id, username, item_name, item_price, quantity, 
+              total_price, note, commission_rate, staff_earning, platform_fee))
         
         conn.commit()
         return order_number
@@ -291,42 +304,69 @@ def create_order(user_id: int, username: str, item_name: str, item_price: float,
         conn.close()
 
 def get_order(order_number: str):
-    """獲取訂單資訊"""
     conn = sqlite3.connect('wallet.db')
     cursor = conn.cursor()
     cursor.execute('''
-        SELECT order_number, user_id, username, item_name, item_price, quantity, total_price, status, note, created_at
+        SELECT order_number, user_id, username, item_name, item_price, quantity, total_price, 
+               status, note, created_at, staff_id, commission_rate, staff_earning, platform_fee, commission_paid
         FROM orders WHERE order_number = ?
     ''', (order_number,))
     result = cursor.fetchone()
     conn.close()
     return result
 
-def complete_order(order_number: str, staff_id: int):
-    """完成訂單"""
+def complete_order_with_commission(order_number: str, staff_id: int, staff_name: str):
     conn = sqlite3.connect('wallet.db')
     cursor = conn.cursor()
     try:
         cursor.execute('''
+            SELECT total_price, commission_rate, staff_earning, platform_fee, commission_paid
+            FROM orders WHERE order_number = ?
+        ''', (order_number,))
+        result = cursor.fetchone()
+        
+        if not result:
+            return False, "訂單不存在"
+        
+        total_price, commission_rate, staff_earning, platform_fee, commission_paid = result
+        
+        if commission_paid:
+            return False, "分潤已發放"
+        
+        cursor.execute('''
             UPDATE orders 
-            SET status = 'completed', completed_at = CURRENT_TIMESTAMP, staff_id = ?
+            SET status = 'completed', completed_at = CURRENT_TIMESTAMP, 
+                staff_id = ?, commission_paid = 1
             WHERE order_number = ?
         ''', (staff_id, order_number))
+        
+        cursor.execute('''
+            INSERT INTO commissions (order_number, staff_id, staff_name, order_amount, 
+                                    commission_rate, staff_earning, platform_fee)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        ''', (order_number, staff_id, staff_name, total_price, commission_rate, 
+              staff_earning, platform_fee))
+        
         conn.commit()
-        return True
+        return True, {
+            'staff_earning': staff_earning,
+            'platform_fee': platform_fee,
+            'total_price': total_price,
+            'commission_rate': commission_rate
+        }
     except Exception as e:
         conn.rollback()
         print(f"完成訂單錯誤: {e}")
-        return False
+        return False, f"系統錯誤: {e}"
     finally:
         conn.close()
 
 def get_pending_orders():
-    """獲取所有待處理訂單"""
     conn = sqlite3.connect('wallet.db')
     cursor = conn.cursor()
     cursor.execute('''
-        SELECT order_number, user_id, username, item_name, item_price, quantity, total_price, note, created_at
+        SELECT order_number, user_id, username, item_name, item_price, quantity, 
+               total_price, note, created_at, staff_earning, platform_fee
         FROM orders WHERE status = 'pending'
         ORDER BY created_at DESC
     ''')
@@ -335,7 +375,6 @@ def get_pending_orders():
     return results
 
 def get_user_orders(user_id: int, limit: int = 10):
-    """獲取用戶訂單紀錄"""
     conn = sqlite3.connect('wallet.db')
     cursor = conn.cursor()
     cursor.execute('''
@@ -347,9 +386,96 @@ def get_user_orders(user_id: int, limit: int = 10):
     conn.close()
     return results
 
-# 儲值系統函數（保留原有功能）
+def get_staff_commissions(staff_id: int, limit: int = 10):
+    conn = sqlite3.connect('wallet.db')
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT order_number, order_amount, commission_rate, staff_earning, platform_fee, created_at
+        FROM commissions WHERE staff_id = ?
+        ORDER BY created_at DESC LIMIT ?
+    ''', (staff_id, limit))
+    results = cursor.fetchall()
+    conn.close()
+    return results
+
+def get_staff_total_earnings(staff_id: int):
+    conn = sqlite3.connect('wallet.db')
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT SUM(staff_earning), COUNT(*)
+        FROM commissions WHERE staff_id = ?
+    ''', (staff_id,))
+    result = cursor.fetchone()
+    conn.close()
+    return result if result else (0, 0)
+
+def get_platform_stats():
+    conn = sqlite3.connect('wallet.db')
+    cursor = conn.cursor()
+    
+    cursor.execute('SELECT COUNT(*), SUM(total_price) FROM orders WHERE status = "completed"')
+    total_orders, total_revenue = cursor.fetchone()
+    
+    cursor.execute('SELECT SUM(staff_earning), SUM(platform_fee) FROM commissions')
+    total_paid_out, total_platform_fee = cursor.fetchone()
+    
+    conn.close()
+    
+    return {
+        'total_orders': total_orders or 0,
+        'total_revenue': total_revenue or 0,
+        'total_paid_out': total_paid_out or 0,
+        'total_platform_fee': total_platform_fee or 0
+    }
+
+def get_monthly_platform_stats(year: int, month: int):
+    conn = sqlite3.connect('wallet.db')
+    cursor = conn.cursor()
+    
+    start_date = f"{year}-{month:02d}-01"
+    if month == 12:
+        end_date = f"{year+1}-01-01"
+    else:
+        end_date = f"{year}-{month+1:02d}-01"
+    
+    cursor.execute('''
+        SELECT COUNT(*), SUM(total_price) 
+        FROM orders 
+        WHERE status = "completed" AND completed_at >= ? AND completed_at < ?
+    ''', (start_date, end_date))
+    monthly_orders, monthly_revenue = cursor.fetchone()
+    
+    cursor.execute('''
+        SELECT SUM(staff_earning), SUM(platform_fee) 
+        FROM commissions 
+        WHERE created_at >= ? AND created_at < ?
+    ''', (start_date, end_date))
+    monthly_paid_out, monthly_platform_fee = cursor.fetchone()
+    
+    conn.close()
+    
+    return {
+        'monthly_orders': monthly_orders or 0,
+        'monthly_revenue': monthly_revenue or 0,
+        'monthly_paid_out': monthly_paid_out or 0,
+        'monthly_platform_fee': monthly_platform_fee or 0
+    }
+
+def get_top_earners(limit: int = 10):
+    conn = sqlite3.connect('wallet.db')
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT staff_name, staff_id, SUM(staff_earning) as total_earning, COUNT(*) as order_count
+        FROM commissions
+        GROUP BY staff_id
+        ORDER BY total_earning DESC
+        LIMIT ?
+    ''', (limit,))
+    results = cursor.fetchall()
+    conn.close()
+    return results
+
 def create_deposit_request(user_id: int, username: str, amount: float, bonus_points: float, screenshot_url: str):
-    """創建儲值申請"""
     conn = sqlite3.connect('wallet.db')
     cursor = conn.cursor()
     try:
@@ -367,7 +493,6 @@ def create_deposit_request(user_id: int, username: str, amount: float, bonus_poi
         conn.close()
 
 def get_pending_requests():
-    """獲取所有待審核的儲值申請"""
     conn = sqlite3.connect('wallet.db')
     cursor = conn.cursor()
     cursor.execute('''
@@ -381,7 +506,6 @@ def get_pending_requests():
     return results
 
 def get_deposit_request(request_id: int):
-    """獲取特定儲值申請"""
     conn = sqlite3.connect('wallet.db')
     cursor = conn.cursor()
     cursor.execute('''
@@ -394,7 +518,6 @@ def get_deposit_request(request_id: int):
     return result
 
 def approve_deposit_request(request_id: int, admin_id: int):
-    """批准儲值申請"""
     conn = sqlite3.connect('wallet.db')
     cursor = conn.cursor()
     try:
@@ -434,7 +557,6 @@ def approve_deposit_request(request_id: int, admin_id: int):
         conn.close()
 
 def reject_deposit_request(request_id: int, admin_id: int, reason: str):
-    """拒絕儲值申請"""
     conn = sqlite3.connect('wallet.db')
     cursor = conn.cursor()
     try:
@@ -454,7 +576,6 @@ def reject_deposit_request(request_id: int, admin_id: int, reason: str):
         conn.close()
 
 def get_transactions(user_id: int, limit: int = 10):
-    """獲取用戶交易紀錄"""
     conn = sqlite3.connect('wallet.db')
     cursor = conn.cursor()
     cursor.execute('''
@@ -469,7 +590,6 @@ def get_transactions(user_id: int, limit: int = 10):
     return results
 
 def get_deposits(user_id: int, limit: int = 10):
-    """獲取用戶儲值紀錄"""
     conn = sqlite3.connect('wallet.db')
     cursor = conn.cursor()
     cursor.execute('''
@@ -484,7 +604,6 @@ def get_deposits(user_id: int, limit: int = 10):
     return results
 
 def get_leaderboard(limit: int = 10):
-    """獲取餘額排行榜"""
     conn = sqlite3.connect('wallet.db')
     cursor = conn.cursor()
     cursor.execute('''
@@ -497,8 +616,6 @@ def get_leaderboard(limit: int = 10):
     conn.close()
     return results
 
-# ============ Bot 事件 ============
-
 @bot.event
 async def on_ready():
     init_database()
@@ -509,11 +626,8 @@ async def on_ready():
     except Exception as e:
         print(f'同步指令失敗: {e}')
 
-# ============ 用戶指令 ============
-
 @bot.tree.command(name="註冊", description="創建你的個人錢包")
 async def register(interaction: discord.Interaction):
-    """註冊指令"""
     user_id = interaction.user.id
     username = interaction.user.name
     
@@ -536,7 +650,6 @@ async def register(interaction: discord.Interaction):
 
 @bot.tree.command(name="我的餘額", description="查詢你的當前餘額")
 async def balance(interaction: discord.Interaction):
-    """查詢餘額指令"""
     user_id = interaction.user.id
     balance_amount = get_balance(user_id)
     
@@ -556,11 +669,8 @@ async def balance(interaction: discord.Interaction):
         embed.set_footer(text=f"用戶: {interaction.user.name}")
         await interaction.response.send_message(embed=embed)
 
-# ============ 商城系統 ============
-
 @bot.tree.command(name="商城", description="查看商城商品列表")
 async def shop(interaction: discord.Interaction):
-    """商城指令"""
     user_id = interaction.user.id
     balance = get_balance(user_id)
     
@@ -590,43 +700,38 @@ async def shop(interaction: discord.Interaction):
         color=discord.Color.gold()
     )
     
-    # 按分類整理商品
     categories = {}
-    for name, price, description, category, stock, emoji in items:
+    for name, price, description, category, stock, emoji, commission_rate in items:
         if category not in categories:
             categories[category] = []
-        categories[category].append((name, price, description, stock, emoji))
+        categories[category].append((name, price, description, stock, emoji, commission_rate))
     
-    # 顯示商品
     for category, products in categories.items():
         product_list = ""
-        for name, price, description, stock, emoji in products:
+        for name, price, description, stock, emoji, commission_rate in products:
             stock_text = f"（剩餘 {stock}）" if stock > 0 else ""
             product_list += f"{emoji} **{name}** - ${price}\n{description}{stock_text}\n\n"
         embed.add_field(name=f"【{category}】", value=product_list, inline=False)
     
     embed.set_footer(text="點擊下方按鈕購買商品")
     
-    # 創建購買按鈕
-    view = ShopView(items[:25])  # Discord 限制最多 25 個按鈕
+    view = ShopView(items[:25])
     await interaction.response.send_message(embed=embed, view=view)
 
-# 商城視圖
 class ShopView(discord.ui.View):
     def __init__(self, items):
         super().__init__(timeout=300)
         
-        # 為每個商品創建按鈕
-        for name, price, description, category, stock, emoji in items:
+        for name, price, description, category, stock, emoji, commission_rate in items:
             button = discord.ui.Button(
                 label=f"{emoji} {name} - ${price}",
                 style=discord.ButtonStyle.primary,
                 custom_id=f"buy_{name}"
             )
-            button.callback = self.create_callback(name, price, description, category, emoji)
+            button.callback = self.create_callback(name, price, description, category, emoji, commission_rate)
             self.add_item(button)
     
-    def create_callback(self, item_name: str, price: float, description: str, category: str, emoji: str):
+    def create_callback(self, item_name: str, price: float, description: str, category: str, emoji: str, commission_rate: float):
         async def button_callback(interaction: discord.Interaction):
             user_id = interaction.user.id
             username = interaction.user.name
@@ -636,7 +741,6 @@ class ShopView(discord.ui.View):
                 await interaction.response.send_message("❌ 請先註冊錢包", ephemeral=True)
                 return
             
-            # 檢查餘額
             if balance < price:
                 embed = discord.Embed(
                     title="❌ 餘額不足",
@@ -647,7 +751,6 @@ class ShopView(discord.ui.View):
                 await interaction.response.send_message(embed=embed, ephemeral=True)
                 return
             
-            # 顯示確認購買訊息
             confirm_embed = discord.Embed(
                 title=f"{emoji} 確認購買",
                 description=f"**{item_name}**\n{description}",
@@ -657,19 +760,18 @@ class ShopView(discord.ui.View):
             confirm_embed.add_field(name="💳 你的餘額", value=f"${balance:.2f}", inline=True)
             confirm_embed.add_field(name="💵 購買後餘額", value=f"${balance - price:.2f}", inline=True)
             
-            # 創建確認按鈕
-            confirm_view = ConfirmPurchaseView(item_name, price, category)
+            confirm_view = ConfirmPurchaseView(item_name, price, category, commission_rate)
             await interaction.response.send_message(embed=confirm_embed, view=confirm_view, ephemeral=True)
         
         return button_callback
 
-# 確認購買視圖
 class ConfirmPurchaseView(discord.ui.View):
-    def __init__(self, item_name: str, price: float, category: str):
+    def __init__(self, item_name: str, price: float, category: str, commission_rate: float):
         super().__init__(timeout=60)
         self.item_name = item_name
         self.price = price
         self.category = category
+        self.commission_rate = commission_rate
     
     @discord.ui.button(label="✅ 確認購買", style=discord.ButtonStyle.success)
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -677,13 +779,11 @@ class ConfirmPurchaseView(discord.ui.View):
         username = interaction.user.name
         balance = get_balance(user_id)
         
-        # 再次檢查餘額
         if balance < self.price:
             await interaction.response.send_message("❌ 餘額不足", ephemeral=True)
             return
         
-        # 顯示備註輸入框
-        modal = PurchaseNoteModal(self.item_name, self.price, self.category)
+        modal = PurchaseNoteModal(self.item_name, self.price, self.category, self.commission_rate)
         await interaction.response.send_modal(modal)
     
     @discord.ui.button(label="❌ 取消", style=discord.ButtonStyle.danger)
@@ -695,13 +795,13 @@ class ConfirmPurchaseView(discord.ui.View):
         )
         await interaction.response.edit_message(embed=embed, view=None)
 
-# 購買備註模態框
 class PurchaseNoteModal(discord.ui.Modal, title="購買資訊"):
-    def __init__(self, item_name: str, price: float, category: str):
+    def __init__(self, item_name: str, price: float, category: str, commission_rate: float):
         super().__init__()
         self.item_name = item_name
         self.price = price
         self.category = category
+        self.commission_rate = commission_rate
     
     note = discord.ui.TextInput(
         label="備註說明（選填）",
@@ -716,26 +816,21 @@ class PurchaseNoteModal(discord.ui.Modal, title="購買資訊"):
         username = interaction.user.name
         note_text = self.note.value or "無"
         
-        # 扣除餘額
         success = update_balance(user_id, -self.price, "消費", f"購買: {self.item_name}")
         
         if not success:
             await interaction.response.send_message("❌ 購買失敗，請稍後再試", ephemeral=True)
             return
         
-        # 創建訂單
-        order_number = create_order(user_id, username, self.item_name, self.price, 1, note_text)
+        order_number = create_order(user_id, username, self.item_name, self.price, 1, self.commission_rate, note_text)
         
         if not order_number:
-            # 如果訂單創建失敗，退款
             update_balance(user_id, self.price, "退款", f"訂單創建失敗退款: {self.item_name}")
             await interaction.response.send_message("❌ 訂單創建失敗，已退款", ephemeral=True)
             return
         
-        # 獲取新餘額
         new_balance = get_balance(user_id)
         
-        # 通知用戶
         user_embed = discord.Embed(
             title="✅ 購買成功！",
             description=f"感謝你的購買！",
@@ -750,11 +845,12 @@ class PurchaseNoteModal(discord.ui.Modal, title="購買資訊"):
         
         await interaction.response.send_message(embed=user_embed, ephemeral=True)
         
-        # 通知工作人員
         await self.notify_staff(interaction, order_number, user_id, username, note_text)
     
     async def notify_staff(self, interaction: discord.Interaction, order_number: str, user_id: int, username: str, note: str):
-        """通知工作人員"""
+        staff_earning = self.price * self.commission_rate
+        platform_fee = self.price - staff_earning
+        
         staff_embed = discord.Embed(
             title="🔔 新訂單通知",
             description=f"用戶 **{username}** 購買了商品",
@@ -763,18 +859,18 @@ class PurchaseNoteModal(discord.ui.Modal, title="購買資訊"):
         staff_embed.add_field(name="📋 訂單號", value=order_number, inline=True)
         staff_embed.add_field(name="👤 用戶", value=f"<@{user_id}>", inline=True)
         staff_embed.add_field(name="📦 商品", value=self.item_name, inline=True)
-        staff_embed.add_field(name="💰 金額", value=f"${self.price}", inline=True)
+        staff_embed.add_field(name="💰 訂單金額", value=f"${self.price}", inline=True)
+        staff_embed.add_field(name="💵 工作人員可得", value=f"${staff_earning:.2f} ({self.commission_rate*100}%)", inline=True)
+        staff_embed.add_field(name="🏢 平台抽成", value=f"${platform_fee:.2f}", inline=True)
         staff_embed.add_field(name="📁 分類", value=self.category, inline=True)
         staff_embed.add_field(name="⏰ 時間", value=datetime.now().strftime("%Y-%m-%d %H:%M:%S"), inline=True)
         staff_embed.add_field(name="📝 用戶備註", value=note, inline=False)
-        staff_embed.set_footer(text=f"使用 /完成訂單 {order_number} 標記完成")
+        staff_embed.set_footer(text=f"使用 /完成訂單 {order_number} 標記完成並發放分潤")
         
-        # 嘗試在指定頻道發送
         if NOTIFICATION_CHANNEL_ID:
             try:
                 channel = bot.get_channel(NOTIFICATION_CHANNEL_ID)
                 if channel:
-                    # 如果有設置對應的工作人員角色，就 @他們
                     role_id = STAFF_ROLES.get(self.category)
                     mention = f"<@&{role_id}>" if role_id else "@工作人員"
                     await channel.send(content=mention, embed=staff_embed)
@@ -782,7 +878,6 @@ class PurchaseNoteModal(discord.ui.Modal, title="購買資訊"):
             except Exception as e:
                 print(f"發送通知失敗: {e}")
         
-        # 如果沒有設置通知頻道，就在當前頻道發送
         try:
             await interaction.channel.send(embed=staff_embed)
         except:
@@ -790,7 +885,6 @@ class PurchaseNoteModal(discord.ui.Modal, title="購買資訊"):
 
 @bot.tree.command(name="我的訂單", description="查看你的購買紀錄")
 async def my_orders(interaction: discord.Interaction):
-    """查看訂單指令"""
     user_id = interaction.user.id
     orders = get_user_orders(user_id, 10)
     
@@ -823,7 +917,6 @@ async def my_orders(interaction: discord.Interaction):
 
 @bot.tree.command(name="我要儲值", description="申請儲值並查看轉帳資訊")
 async def deposit_request(interaction: discord.Interaction):
-    """儲值申請指令"""
     user_id = interaction.user.id
     balance = get_balance(user_id)
     
@@ -866,7 +959,6 @@ async def deposit_request(interaction: discord.Interaction):
     view = DepositView()
     await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
-# 儲值選擇按鈕視圖（保留原有功能）
 class DepositView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=300)
@@ -971,8 +1063,7 @@ class ScreenshotModal(discord.ui.Modal, title="上傳付款截圖"):
             await interaction.response.send_message(embed=error_embed, ephemeral=True)
 
 @bot.tree.command(name="消費紀錄", description="查看你的消費紀錄")
-async def transactions(interaction: discord.Interaction):
-    """消費紀錄指令"""
+async def transactions_cmd(interaction: discord.Interaction):
     user_id = interaction.user.id
     records = get_transactions(user_id, 10)
     
@@ -1003,7 +1094,6 @@ async def transactions(interaction: discord.Interaction):
 
 @bot.tree.command(name="儲值紀錄", description="查看你的儲值紀錄")
 async def deposits_history(interaction: discord.Interaction):
-    """儲值紀錄指令"""
     user_id = interaction.user.id
     records = get_deposits(user_id, 10)
     
@@ -1035,11 +1125,149 @@ async def deposits_history(interaction: discord.Interaction):
     embed.set_footer(text=f"用戶: {interaction.user.name}")
     await interaction.response.send_message(embed=embed)
 
-# ============ 管理員指令 ============
+@bot.tree.command(name="我的收入", description="查看你的分潤收入")
+async def my_earnings(interaction: discord.Interaction):
+    staff_id = interaction.user.id
+    
+    total_earning, order_count = get_staff_total_earnings(staff_id)
+    commissions = get_staff_commissions(staff_id, 10)
+    
+    embed = discord.Embed(
+        title="💰 我的收入",
+        description=f"工作人員: {interaction.user.name}",
+        color=discord.Color.gold()
+    )
+    
+    embed.add_field(name="📊 總收入", value=f"${total_earning:.2f}", inline=True)
+    embed.add_field(name="📦 完成訂單", value=f"{order_count} 筆", inline=True)
+    embed.add_field(name="💵 平均單價", value=f"${(total_earning/order_count if order_count > 0 else 0):.2f}", inline=True)
+    
+    if commissions:
+        embed.add_field(
+            name="\n📋 最近10筆分潤",
+            value="━━━━━━━━━━━━━━━━",
+            inline=False
+        )
+        
+        for order_num, order_amount, comm_rate, earning, platform_fee, created_at in commissions:
+            embed.add_field(
+                name=f"訂單 {order_num}",
+                value=(
+                    f"訂單金額: ${order_amount:.2f}\n"
+                    f"你的收入: ${earning:.2f} ({comm_rate*100}%)\n"
+                    f"平台抽成: ${platform_fee:.2f}\n"
+                    f"時間: {created_at}"
+                ),
+                inline=False
+            )
+    else:
+        embed.add_field(
+            name="📋 分潤紀錄",
+            value="尚無分潤紀錄",
+            inline=False
+        )
+    
+    embed.set_footer(text="完成更多訂單來增加收入！")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="本月收入", description="查看本月分潤收入")
+async def monthly_earnings(interaction: discord.Interaction):
+    staff_id = interaction.user.id
+    now = datetime.now()
+    
+    conn = sqlite3.connect('wallet.db')
+    cursor = conn.cursor()
+    
+    start_date = f"{now.year}-{now.month:02d}-01"
+    if now.month == 12:
+        end_date = f"{now.year+1}-01-01"
+    else:
+        end_date = f"{now.year}-{now.month+1:02d}-01"
+    
+    cursor.execute('''
+        SELECT COUNT(*), SUM(staff_earning), SUM(order_amount)
+        FROM commissions
+        WHERE staff_id = ? AND created_at >= ? AND created_at < ?
+    ''', (staff_id, start_date, end_date))
+    
+    result = cursor.fetchone()
+    conn.close()
+    
+    if not result or result[0] == 0:
+        embed = discord.Embed(
+            title=f"📅 本月收入 ({now.year}/{now.month})",
+            description="本月尚無收入紀錄",
+            color=discord.Color.grey()
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+    
+    order_count, total_earning, total_order_amount = result
+    avg_earning = total_earning / order_count if order_count > 0 else 0
+    
+    embed = discord.Embed(
+        title=f"📅 本月收入 ({now.year}/{now.month})",
+        description=f"工作人員: {interaction.user.name}",
+        color=discord.Color.green()
+    )
+    
+    embed.add_field(name="💰 本月總收入", value=f"${total_earning:.2f}", inline=True)
+    embed.add_field(name="📦 完成訂單", value=f"{order_count} 筆", inline=True)
+    embed.add_field(name="💵 平均單價", value=f"${avg_earning:.2f}", inline=True)
+    embed.add_field(name="📊 訂單總額", value=f"${total_order_amount:.2f}", inline=True)
+    
+    days_in_month = calendar.monthrange(now.year, now.month)[1]
+    days_passed = now.day
+    days_left = days_in_month - days_passed
+    
+    embed.add_field(
+        name="⏰ 本月進度",
+        value=f"已過 {days_passed} 天，剩餘 {days_left} 天",
+        inline=False
+    )
+    
+    embed.set_footer(text="繼續努力，衝刺本月目標！")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="收入排行", description="查看工作人員收入排行榜")
+async def earnings_leaderboard(interaction: discord.Interaction):
+    rankings = get_top_earners(10)
+    
+    if not rankings:
+        embed = discord.Embed(
+            title="🏆 收入排行榜",
+            description="目前沒有任何分潤紀錄",
+            color=discord.Color.grey()
+        )
+        await interaction.response.send_message(embed=embed)
+        return
+    
+    embed = discord.Embed(
+        title="🏆 工作人員收入排行榜 (TOP 10)",
+        description="根據累計收入排名",
+        color=discord.Color.gold()
+    )
+    
+    medals = ["🥇", "🥈", "🥉"]
+    for i, (staff_name, staff_id, total_earning, order_count) in enumerate(rankings, 1):
+        medal = medals[i-1] if i <= 3 else f"#{i}"
+        avg_earning = total_earning / order_count if order_count > 0 else 0
+        
+        embed.add_field(
+            name=f"{medal} {staff_name}",
+            value=(
+                f"💰 總收入: ${total_earning:.2f}\n"
+                f"📦 完成訂單: {order_count} 筆\n"
+                f"💵 平均單價: ${avg_earning:.2f}"
+            ),
+            inline=False
+        )
+    
+    embed.set_footer(text="使用 /我的收入 查看個人詳細數據")
+    await interaction.response.send_message(embed=embed)
 
 @bot.tree.command(name="查看訂單", description="[管理員] 查看所有待處理訂單")
 async def view_orders(interaction: discord.Interaction):
-    """查看訂單指令"""
     if not interaction.user.guild_permissions.administrator:
         await interaction.response.send_message("❌ 此指令僅限管理員使用", ephemeral=True)
         return
@@ -1061,13 +1289,16 @@ async def view_orders(interaction: discord.Interaction):
         color=discord.Color.orange()
     )
     
-    for order_number, user_id, username, item_name, item_price, quantity, total_price, note, created_at in orders:
+    for (order_number, user_id, username, item_name, item_price, quantity, 
+         total_price, note, created_at, staff_earning, platform_fee) in orders:
         embed.add_field(
             name=f"訂單 {order_number}",
             value=(
                 f"👤 用戶: <@{user_id}> ({username})\n"
                 f"📦 商品: {item_name}\n"
                 f"💰 金額: ${total_price}\n"
+                f"💵 工作人員可得: ${staff_earning:.2f}\n"
+                f"🏢 平台抽成: ${platform_fee:.2f}\n"
                 f"📝 備註: {note}\n"
                 f"⏰ 時間: {created_at}\n"
                 f"━━━━━━━━━━━━━━━━"
@@ -1075,13 +1306,15 @@ async def view_orders(interaction: discord.Interaction):
             inline=False
         )
     
-    embed.set_footer(text="使用 /完成訂單 [訂單號] 標記完成")
+    embed.set_footer(text="使用 /完成訂單 [訂單號] [@工作人員] 標記完成並發放分潤")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-@bot.tree.command(name="完成訂單", description="[管理員] 標記訂單為已完成")
-@app_commands.describe(訂單號="要完成的訂單號")
-async def complete_order_cmd(interaction: discord.Interaction, 訂單號: str):
-    """完成訂單指令"""
+@bot.tree.command(name="完成訂單", description="[管理員] 標記訂單為已完成並發放分潤")
+@app_commands.describe(
+    訂單號="要完成的訂單號",
+    工作人員="負責此訂單的工作人員（可選，預設為執行者）"
+)
+async def complete_order_cmd(interaction: discord.Interaction, 訂單號: str, 工作人員: Optional[discord.Member] = None):
     if not interaction.user.guild_permissions.administrator:
         await interaction.response.send_message("❌ 此指令僅限管理員使用", ephemeral=True)
         return
@@ -1091,27 +1324,39 @@ async def complete_order_cmd(interaction: discord.Interaction, 訂單號: str):
         await interaction.response.send_message("❌ 找不到此訂單", ephemeral=True)
         return
     
-    order_number, user_id, username, item_name, item_price, quantity, total_price, status, note, created_at = order_info
+    (order_number, user_id, username, item_name, item_price, quantity, total_price, 
+     status, note, created_at, old_staff_id, commission_rate, staff_earning, 
+     platform_fee, commission_paid) = order_info
     
     if status == 'completed':
         await interaction.response.send_message("⚠️ 此訂單已完成", ephemeral=True)
         return
     
-    success = complete_order(訂單號, interaction.user.id)
+    staff = 工作人員 if 工作人員 else interaction.user
+    staff_id = staff.id
+    staff_name = staff.name
+    
+    success, result = complete_order_with_commission(訂單號, staff_id, staff_name)
     
     if success:
+        earnings_info = result
+        
         embed = discord.Embed(
             title="✅ 訂單已完成",
+            description="分潤已自動發放",
             color=discord.Color.green()
         )
-        embed.add_field(name="訂單號", value=訂單號, inline=True)
-        embed.add_field(name="用戶", value=f"<@{user_id}>", inline=True)
-        embed.add_field(name="商品", value=item_name, inline=True)
+        embed.add_field(name="📋 訂單號", value=訂單號, inline=True)
+        embed.add_field(name="👤 客戶", value=f"<@{user_id}>", inline=True)
+        embed.add_field(name="📦 商品", value=item_name, inline=True)
+        embed.add_field(name="💰 訂單金額", value=f"${earnings_info['total_price']:.2f}", inline=True)
+        embed.add_field(name="👨‍💼 工作人員", value=staff.mention, inline=True)
+        embed.add_field(name="💵 工作人員收入", value=f"${earnings_info['staff_earning']:.2f} ({earnings_info['commission_rate']*100}%)", inline=True)
+        embed.add_field(name="🏢 平台抽成", value=f"${earnings_info['platform_fee']:.2f} ({(1-earnings_info['commission_rate'])*100}%)", inline=True)
         embed.set_footer(text=f"完成者: {interaction.user.name}")
         
         await interaction.response.send_message(embed=embed)
         
-        # 通知用戶
         try:
             user = await bot.fetch_user(user_id)
             user_embed = discord.Embed(
@@ -1126,12 +1371,81 @@ async def complete_order_cmd(interaction: discord.Interaction, 訂單號: str):
             await user.send(embed=user_embed)
         except:
             pass
+        
+        if staff_id != interaction.user.id:
+            try:
+                staff_user = await bot.fetch_user(staff_id)
+                staff_embed = discord.Embed(
+                    title="💰 收入到帳",
+                    description=f"訂單 {訂單號} 已完成",
+                    color=discord.Color.gold()
+                )
+                staff_embed.add_field(name="你的收入", value=f"${earnings_info['staff_earning']:.2f}", inline=True)
+                staff_embed.add_field(name="訂單金額", value=f"${earnings_info['total_price']:.2f}", inline=True)
+                staff_embed.add_field(name="抽成比例", value=f"{earnings_info['commission_rate']*100}%", inline=True)
+                staff_embed.set_footer(text="繼續加油！")
+                
+                await staff_user.send(embed=staff_embed)
+            except:
+                pass
     else:
-        await interaction.response.send_message("❌ 操作失敗", ephemeral=True)
+        await interaction.response.send_message(f"❌ 處理失敗: {result}", ephemeral=True)
+
+@bot.tree.command(name="平台統計", description="[管理員] 查看平台營收統計")
+async def platform_stats(interaction: discord.Interaction):
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("❌ 此指令僅限管理員使用", ephemeral=True)
+        return
+    
+    stats = get_platform_stats()
+    now = datetime.now()
+    monthly_stats = get_monthly_platform_stats(now.year, now.month)
+    
+    embed = discord.Embed(
+        title="📊 平台統計",
+        description="整體營運數據",
+        color=discord.Color.blue()
+    )
+    
+    embed.add_field(
+        name="🏆 總體數據",
+        value=(
+            f"總訂單數: {stats['total_orders']} 筆\n"
+            f"總營收: ${stats['total_revenue']:.2f}\n"
+            f"已付出分潤: ${stats['total_paid_out']:.2f}\n"
+            f"平台總收益: ${stats['total_platform_fee']:.2f}"
+        ),
+        inline=False
+    )
+    
+    embed.add_field(
+        name=f"📅 本月數據 ({now.year}/{now.month})",
+        value=(
+            f"本月訂單: {monthly_stats['monthly_orders']} 筆\n"
+            f"本月營收: ${monthly_stats['monthly_revenue']:.2f}\n"
+            f"本月分潤: ${monthly_stats['monthly_paid_out']:.2f}\n"
+            f"本月平台收益: ${monthly_stats['monthly_platform_fee']:.2f}"
+        ),
+        inline=False
+    )
+    
+    avg_order_value = stats['total_revenue'] / stats['total_orders'] if stats['total_orders'] > 0 else 0
+    platform_margin = (stats['total_platform_fee'] / stats['total_revenue'] * 100) if stats['total_revenue'] > 0 else 0
+    
+    embed.add_field(
+        name="📈 營運指標",
+        value=(
+            f"平均訂單金額: ${avg_order_value:.2f}\n"
+            f"平台利潤率: {platform_margin:.1f}%"
+        ),
+        inline=False
+    )
+    
+    embed.set_footer(text=f"統計時間: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 @bot.tree.command(name="審核儲值", description="[管理員] 查看所有待審核的儲值申請")
 async def review_deposits(interaction: discord.Interaction):
-    """審核儲值指令"""
     if not interaction.user.guild_permissions.administrator:
         await interaction.response.send_message("❌ 此指令僅限管理員使用", ephemeral=True)
         return
@@ -1173,7 +1487,6 @@ async def review_deposits(interaction: discord.Interaction):
 @bot.tree.command(name="通過儲值", description="[管理員] 通過儲值申請")
 @app_commands.describe(申請編號="要通過的申請編號")
 async def approve_deposit(interaction: discord.Interaction, 申請編號: int):
-    """通過儲值指令"""
     if not interaction.user.guild_permissions.administrator:
         await interaction.response.send_message("❌ 此指令僅限管理員使用", ephemeral=True)
         return
@@ -1224,7 +1537,6 @@ async def approve_deposit(interaction: discord.Interaction, 申請編號: int):
 @bot.tree.command(name="拒絕儲值", description="[管理員] 拒絕儲值申請")
 @app_commands.describe(申請編號="要拒絕的申請編號", 原因="拒絕原因")
 async def reject_deposit(interaction: discord.Interaction, 申請編號: int, 原因: str):
-    """拒絕儲值指令"""
     if not interaction.user.guild_permissions.administrator:
         await interaction.response.send_message("❌ 此指令僅限管理員使用", ephemeral=True)
         return
@@ -1274,7 +1586,6 @@ async def reject_deposit(interaction: discord.Interaction, 申請編號: int, �
 @bot.tree.command(name="加錢", description="[管理員] 為用戶增加餘額")
 @app_commands.describe(用戶="要增加餘額的用戶", 金額="要增加的金額", 說明="說明原因")
 async def add_money(interaction: discord.Interaction, 用戶: discord.Member, 金額: float, 說明: str = "管理員加錢"):
-    """管理員加錢指令"""
     if not interaction.user.guild_permissions.administrator:
         await interaction.response.send_message("❌ 此指令僅限管理員使用", ephemeral=True)
         return
@@ -1306,7 +1617,6 @@ async def add_money(interaction: discord.Interaction, 用戶: discord.Member, �
 @bot.tree.command(name="扣錢", description="[管理員] 扣除用戶餘額")
 @app_commands.describe(用戶="要扣除餘額的用戶", 金額="要扣除的金額", 說明="說明原因")
 async def deduct_money(interaction: discord.Interaction, 用戶: discord.Member, 金額: float, 說明: str = "管理員扣錢"):
-    """管理員扣錢指令"""
     if not interaction.user.guild_permissions.administrator:
         await interaction.response.send_message("❌ 此指令僅限管理員使用", ephemeral=True)
         return
@@ -1338,7 +1648,6 @@ async def deduct_money(interaction: discord.Interaction, 用戶: discord.Member,
 @bot.tree.command(name="清零", description="[管理員] 將用戶餘額清零")
 @app_commands.describe(用戶="要清零的用戶")
 async def reset_balance(interaction: discord.Interaction, 用戶: discord.Member):
-    """管理員清零指令"""
     if not interaction.user.guild_permissions.administrator:
         await interaction.response.send_message("❌ 此指令僅限管理員使用", ephemeral=True)
         return
@@ -1370,7 +1679,6 @@ async def reset_balance(interaction: discord.Interaction, 用戶: discord.Member
 
 @bot.tree.command(name="全服餘額排行", description="查看全服務器餘額排行榜")
 async def leaderboard(interaction: discord.Interaction):
-    """排行榜指令"""
     rankings = get_leaderboard(10)
     
     if not rankings:
@@ -1398,7 +1706,6 @@ async def leaderboard(interaction: discord.Interaction):
     
     await interaction.response.send_message(embed=embed)
 
-# 啟動 Bot
 if __name__ == "__main__":
     TOKEN = os.getenv('DISCORD_TOKEN')
     if not TOKEN:
