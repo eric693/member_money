@@ -5,6 +5,10 @@ import sqlite3
 from datetime import datetime
 import os
 from typing import Optional
+from dotenv import load_dotenv
+
+# 載入 .env 文件
+load_dotenv()
 
 # 初始化 Bot
 intents = discord.Intents.default()
