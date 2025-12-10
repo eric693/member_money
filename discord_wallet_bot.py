@@ -26,6 +26,59 @@ BANK_INFO = {
     "戶名": "你的名字"
 }
 
+# ============ 商城商品配置 ============
+# 商品格式: "商品名稱": {"price": 價格, "description": "描述", "category": "分類", "stock": 庫存(-1=無限)}
+SHOP_ITEMS = {
+    "陪玩1小時": {
+        "price": 200,
+        "description": "專業陪玩1小時，提供語音服務",
+        "category": "陪玩服務",
+        "stock": -1,  # -1 表示無限庫存
+        "emoji": "🎮"
+    },
+    "傳說上分1星": {
+        "price": 150,
+        "description": "專業代練，保證上分到傳說",
+        "category": "代練服務",
+        "stock": -1,
+        "emoji": "⭐"
+    },
+    "代儲1000鑽": {
+        "price": 280,
+        "description": "遊戲內代儲1000鑽石",
+        "category": "代儲服務",
+        "stock": -1,
+        "emoji": "💎"
+    },
+    "客製服務": {
+        "price": 500,
+        "description": "客製化服務，請在購買後說明需求",
+        "category": "客製服務",
+        "stock": -1,
+        "emoji": "✨"
+    },
+    "VIP會員月卡": {
+        "price": 1000,
+        "description": "VIP會員30天，享有專屬優惠",
+        "category": "會員服務",
+        "stock": -1,
+        "emoji": "👑"
+    }
+}
+
+# 工作人員角色 ID（需要在 Discord 伺服器中設置）
+# 格式: "分類": 角色ID
+STAFF_ROLES = {
+    "陪玩服務": 1041668052909035612,  # 替換為實際的角色 ID，例如: 1234567890
+    "代練服務": None,
+    "代儲服務": None,
+    "客製服務": None,
+    "會員服務": None
+}
+
+# 通知頻道 ID（需要設置）
+NOTIFICATION_CHANNEL_ID = 1448290873031917701  # 替換為實際的頻道 ID
+
 # 初始化 Bot
 intents = discord.Intents.default()
 intents.message_content = True
@@ -61,7 +114,7 @@ def init_database():
         )
     ''')
     
-    # 儲值紀錄表（已完成的儲值）
+    # 儲值紀錄表
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS deposits (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -74,7 +127,7 @@ def init_database():
         )
     ''')
     
-    # 儲值申請表（待審核的儲值）
+    # 儲值申請表
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS deposit_requests (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -92,10 +145,55 @@ def init_database():
         )
     ''')
     
+    # 商品表
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS shop_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT UNIQUE NOT NULL,
+            price REAL NOT NULL,
+            description TEXT,
+            category TEXT,
+            stock INTEGER DEFAULT -1,
+            emoji TEXT,
+            enabled INTEGER DEFAULT 1,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    
+    # 訂單表
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS orders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            order_number TEXT UNIQUE NOT NULL,
+            user_id INTEGER NOT NULL,
+            username TEXT NOT NULL,
+            item_name TEXT NOT NULL,
+            item_price REAL NOT NULL,
+            quantity INTEGER DEFAULT 1,
+            total_price REAL NOT NULL,
+            status TEXT DEFAULT 'pending',
+            note TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            completed_at TIMESTAMP,
+            staff_id INTEGER,
+            FOREIGN KEY (user_id) REFERENCES wallets (user_id)
+        )
+    ''')
+    
+    # 初始化商品（如果表為空）
+    cursor.execute('SELECT COUNT(*) FROM shop_items')
+    if cursor.fetchone()[0] == 0:
+        for name, info in SHOP_ITEMS.items():
+            cursor.execute('''
+                INSERT INTO shop_items (name, price, description, category, stock, emoji)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', (name, info["price"], info["description"], info["category"], info["stock"], info["emoji"]))
+    
     conn.commit()
     conn.close()
 
-# 資料庫操作函數
+# ============ 資料庫操作函數 ============
+
 def create_wallet(user_id: int, username: str):
     """創建用戶錢包"""
     conn = sqlite3.connect('wallet.db')
@@ -125,17 +223,14 @@ def update_balance(user_id: int, amount: float, transaction_type: str, descripti
     cursor = conn.cursor()
     
     try:
-        # 更新餘額
         cursor.execute('UPDATE wallets SET balance = balance + ? WHERE user_id = ?', 
                       (amount, user_id))
         
-        # 記錄交易
         cursor.execute('''
             INSERT INTO transactions (user_id, amount, type, description)
             VALUES (?, ?, ?, ?)
         ''', (user_id, amount, transaction_type, description))
         
-        # 如果是儲值，記錄到儲值表
         if transaction_type == '儲值':
             cursor.execute('''
                 INSERT INTO deposits (user_id, amount, method)
@@ -151,6 +246,108 @@ def update_balance(user_id: int, amount: float, transaction_type: str, descripti
     finally:
         conn.close()
 
+def get_shop_items(enabled_only=True):
+    """獲取商品列表"""
+    conn = sqlite3.connect('wallet.db')
+    cursor = conn.cursor()
+    if enabled_only:
+        cursor.execute('SELECT name, price, description, category, stock, emoji FROM shop_items WHERE enabled = 1')
+    else:
+        cursor.execute('SELECT name, price, description, category, stock, emoji FROM shop_items')
+    results = cursor.fetchall()
+    conn.close()
+    return results
+
+def get_shop_item(item_name: str):
+    """獲取單個商品資訊"""
+    conn = sqlite3.connect('wallet.db')
+    cursor = conn.cursor()
+    cursor.execute('SELECT name, price, description, category, stock, emoji FROM shop_items WHERE name = ? AND enabled = 1', (item_name,))
+    result = cursor.fetchone()
+    conn.close()
+    return result
+
+def create_order(user_id: int, username: str, item_name: str, item_price: float, quantity: int, note: str = ""):
+    """創建訂單"""
+    conn = sqlite3.connect('wallet.db')
+    cursor = conn.cursor()
+    try:
+        # 生成訂單號
+        order_number = f"ORD{datetime.now().strftime('%Y%m%d%H%M%S')}{user_id % 1000:03d}"
+        total_price = item_price * quantity
+        
+        cursor.execute('''
+            INSERT INTO orders (order_number, user_id, username, item_name, item_price, quantity, total_price, note)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (order_number, user_id, username, item_name, item_price, quantity, total_price, note))
+        
+        conn.commit()
+        return order_number
+    except Exception as e:
+        conn.rollback()
+        print(f"創建訂單錯誤: {e}")
+        return None
+    finally:
+        conn.close()
+
+def get_order(order_number: str):
+    """獲取訂單資訊"""
+    conn = sqlite3.connect('wallet.db')
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT order_number, user_id, username, item_name, item_price, quantity, total_price, status, note, created_at
+        FROM orders WHERE order_number = ?
+    ''', (order_number,))
+    result = cursor.fetchone()
+    conn.close()
+    return result
+
+def complete_order(order_number: str, staff_id: int):
+    """完成訂單"""
+    conn = sqlite3.connect('wallet.db')
+    cursor = conn.cursor()
+    try:
+        cursor.execute('''
+            UPDATE orders 
+            SET status = 'completed', completed_at = CURRENT_TIMESTAMP, staff_id = ?
+            WHERE order_number = ?
+        ''', (staff_id, order_number))
+        conn.commit()
+        return True
+    except Exception as e:
+        conn.rollback()
+        print(f"完成訂單錯誤: {e}")
+        return False
+    finally:
+        conn.close()
+
+def get_pending_orders():
+    """獲取所有待處理訂單"""
+    conn = sqlite3.connect('wallet.db')
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT order_number, user_id, username, item_name, item_price, quantity, total_price, note, created_at
+        FROM orders WHERE status = 'pending'
+        ORDER BY created_at DESC
+    ''')
+    results = cursor.fetchall()
+    conn.close()
+    return results
+
+def get_user_orders(user_id: int, limit: int = 10):
+    """獲取用戶訂單紀錄"""
+    conn = sqlite3.connect('wallet.db')
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT order_number, item_name, total_price, status, created_at
+        FROM orders WHERE user_id = ?
+        ORDER BY created_at DESC LIMIT ?
+    ''', (user_id, limit))
+    results = cursor.fetchall()
+    conn.close()
+    return results
+
+# 儲值系統函數（保留原有功能）
 def create_deposit_request(user_id: int, username: str, amount: float, bonus_points: float, screenshot_url: str):
     """創建儲值申請"""
     conn = sqlite3.connect('wallet.db')
@@ -201,7 +398,6 @@ def approve_deposit_request(request_id: int, admin_id: int):
     conn = sqlite3.connect('wallet.db')
     cursor = conn.cursor()
     try:
-        # 獲取申請資訊
         cursor.execute('SELECT user_id, amount, bonus_points FROM deposit_requests WHERE id = ?', (request_id,))
         result = cursor.fetchone()
         if not result:
@@ -209,24 +405,20 @@ def approve_deposit_request(request_id: int, admin_id: int):
         
         user_id, amount, bonus_points = result
         
-        # 更新申請狀態
         cursor.execute('''
             UPDATE deposit_requests 
             SET status = 'approved', processed_at = CURRENT_TIMESTAMP, processed_by = ?
             WHERE id = ?
         ''', (admin_id, request_id))
         
-        # 增加用戶餘額
         cursor.execute('UPDATE wallets SET balance = balance + ? WHERE user_id = ?', 
                       (bonus_points, user_id))
         
-        # 記錄交易
         cursor.execute('''
             INSERT INTO transactions (user_id, amount, type, description)
             VALUES (?, ?, ?, ?)
         ''', (user_id, bonus_points, "儲值", f"台灣轉帳 ${amount} → {bonus_points} 點"))
         
-        # 記錄到儲值表
         cursor.execute('''
             INSERT INTO deposits (user_id, amount, method)
             VALUES (?, ?, ?)
@@ -305,7 +497,8 @@ def get_leaderboard(limit: int = 10):
     conn.close()
     return results
 
-# Bot 事件
+# ============ Bot 事件 ============
+
 @bot.event
 async def on_ready():
     init_database()
@@ -331,7 +524,7 @@ async def register(interaction: discord.Interaction):
             color=discord.Color.green()
         )
         embed.add_field(name="初始餘額", value="$0", inline=False)
-        embed.set_footer(text="使用 /我的餘額 查看餘額 | /我要儲值 開始儲值")
+        embed.set_footer(text="使用 /商城 查看商品 | /我要儲值 開始儲值")
         await interaction.response.send_message(embed=embed)
     else:
         embed = discord.Embed(
@@ -363,6 +556,271 @@ async def balance(interaction: discord.Interaction):
         embed.set_footer(text=f"用戶: {interaction.user.name}")
         await interaction.response.send_message(embed=embed)
 
+# ============ 商城系統 ============
+
+@bot.tree.command(name="商城", description="查看商城商品列表")
+async def shop(interaction: discord.Interaction):
+    """商城指令"""
+    user_id = interaction.user.id
+    balance = get_balance(user_id)
+    
+    if balance is None:
+        embed = discord.Embed(
+            title="❌ 尚未註冊",
+            description="請先使用 /註冊 創建錢包",
+            color=discord.Color.red()
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+    
+    items = get_shop_items()
+    
+    if not items:
+        embed = discord.Embed(
+            title="🏪 商城",
+            description="目前沒有可用商品",
+            color=discord.Color.grey()
+        )
+        await interaction.response.send_message(embed=embed)
+        return
+    
+    embed = discord.Embed(
+        title="🏪 商城",
+        description=f"你的餘額: **${balance:.2f}**\n請選擇想要購買的商品",
+        color=discord.Color.gold()
+    )
+    
+    # 按分類整理商品
+    categories = {}
+    for name, price, description, category, stock, emoji in items:
+        if category not in categories:
+            categories[category] = []
+        categories[category].append((name, price, description, stock, emoji))
+    
+    # 顯示商品
+    for category, products in categories.items():
+        product_list = ""
+        for name, price, description, stock, emoji in products:
+            stock_text = f"（剩餘 {stock}）" if stock > 0 else ""
+            product_list += f"{emoji} **{name}** - ${price}\n{description}{stock_text}\n\n"
+        embed.add_field(name=f"【{category}】", value=product_list, inline=False)
+    
+    embed.set_footer(text="點擊下方按鈕購買商品")
+    
+    # 創建購買按鈕
+    view = ShopView(items[:25])  # Discord 限制最多 25 個按鈕
+    await interaction.response.send_message(embed=embed, view=view)
+
+# 商城視圖
+class ShopView(discord.ui.View):
+    def __init__(self, items):
+        super().__init__(timeout=300)
+        
+        # 為每個商品創建按鈕
+        for name, price, description, category, stock, emoji in items:
+            button = discord.ui.Button(
+                label=f"{emoji} {name} - ${price}",
+                style=discord.ButtonStyle.primary,
+                custom_id=f"buy_{name}"
+            )
+            button.callback = self.create_callback(name, price, description, category, emoji)
+            self.add_item(button)
+    
+    def create_callback(self, item_name: str, price: float, description: str, category: str, emoji: str):
+        async def button_callback(interaction: discord.Interaction):
+            user_id = interaction.user.id
+            username = interaction.user.name
+            balance = get_balance(user_id)
+            
+            if balance is None:
+                await interaction.response.send_message("❌ 請先註冊錢包", ephemeral=True)
+                return
+            
+            # 檢查餘額
+            if balance < price:
+                embed = discord.Embed(
+                    title="❌ 餘額不足",
+                    description=f"此商品需要 ${price}，你的餘額只有 ${balance:.2f}",
+                    color=discord.Color.red()
+                )
+                embed.add_field(name="💡 提示", value="使用 /我要儲值 進行儲值", inline=False)
+                await interaction.response.send_message(embed=embed, ephemeral=True)
+                return
+            
+            # 顯示確認購買訊息
+            confirm_embed = discord.Embed(
+                title=f"{emoji} 確認購買",
+                description=f"**{item_name}**\n{description}",
+                color=discord.Color.blue()
+            )
+            confirm_embed.add_field(name="💰 價格", value=f"${price}", inline=True)
+            confirm_embed.add_field(name="💳 你的餘額", value=f"${balance:.2f}", inline=True)
+            confirm_embed.add_field(name="💵 購買後餘額", value=f"${balance - price:.2f}", inline=True)
+            
+            # 創建確認按鈕
+            confirm_view = ConfirmPurchaseView(item_name, price, category)
+            await interaction.response.send_message(embed=confirm_embed, view=confirm_view, ephemeral=True)
+        
+        return button_callback
+
+# 確認購買視圖
+class ConfirmPurchaseView(discord.ui.View):
+    def __init__(self, item_name: str, price: float, category: str):
+        super().__init__(timeout=60)
+        self.item_name = item_name
+        self.price = price
+        self.category = category
+    
+    @discord.ui.button(label="✅ 確認購買", style=discord.ButtonStyle.success)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        user_id = interaction.user.id
+        username = interaction.user.name
+        balance = get_balance(user_id)
+        
+        # 再次檢查餘額
+        if balance < self.price:
+            await interaction.response.send_message("❌ 餘額不足", ephemeral=True)
+            return
+        
+        # 顯示備註輸入框
+        modal = PurchaseNoteModal(self.item_name, self.price, self.category)
+        await interaction.response.send_modal(modal)
+    
+    @discord.ui.button(label="❌ 取消", style=discord.ButtonStyle.danger)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = discord.Embed(
+            title="❌ 已取消",
+            description="購買已取消",
+            color=discord.Color.grey()
+        )
+        await interaction.response.edit_message(embed=embed, view=None)
+
+# 購買備註模態框
+class PurchaseNoteModal(discord.ui.Modal, title="購買資訊"):
+    def __init__(self, item_name: str, price: float, category: str):
+        super().__init__()
+        self.item_name = item_name
+        self.price = price
+        self.category = category
+    
+    note = discord.ui.TextInput(
+        label="備註說明（選填）",
+        placeholder="請輸入遊戲ID、伺服器、聯絡方式等資訊",
+        style=discord.TextStyle.paragraph,
+        required=False,
+        max_length=500
+    )
+    
+    async def on_submit(self, interaction: discord.Interaction):
+        user_id = interaction.user.id
+        username = interaction.user.name
+        note_text = self.note.value or "無"
+        
+        # 扣除餘額
+        success = update_balance(user_id, -self.price, "消費", f"購買: {self.item_name}")
+        
+        if not success:
+            await interaction.response.send_message("❌ 購買失敗，請稍後再試", ephemeral=True)
+            return
+        
+        # 創建訂單
+        order_number = create_order(user_id, username, self.item_name, self.price, 1, note_text)
+        
+        if not order_number:
+            # 如果訂單創建失敗，退款
+            update_balance(user_id, self.price, "退款", f"訂單創建失敗退款: {self.item_name}")
+            await interaction.response.send_message("❌ 訂單創建失敗，已退款", ephemeral=True)
+            return
+        
+        # 獲取新餘額
+        new_balance = get_balance(user_id)
+        
+        # 通知用戶
+        user_embed = discord.Embed(
+            title="✅ 購買成功！",
+            description=f"感謝你的購買！",
+            color=discord.Color.green()
+        )
+        user_embed.add_field(name="📦 商品", value=self.item_name, inline=True)
+        user_embed.add_field(name="💰 金額", value=f"${self.price}", inline=True)
+        user_embed.add_field(name="📋 訂單號", value=order_number, inline=True)
+        user_embed.add_field(name="💳 剩餘餘額", value=f"${new_balance:.2f}", inline=True)
+        user_embed.add_field(name="📝 備註", value=note_text, inline=False)
+        user_embed.set_footer(text="工作人員會盡快為你服務，請耐心等待")
+        
+        await interaction.response.send_message(embed=user_embed, ephemeral=True)
+        
+        # 通知工作人員
+        await self.notify_staff(interaction, order_number, user_id, username, note_text)
+    
+    async def notify_staff(self, interaction: discord.Interaction, order_number: str, user_id: int, username: str, note: str):
+        """通知工作人員"""
+        staff_embed = discord.Embed(
+            title="🔔 新訂單通知",
+            description=f"用戶 **{username}** 購買了商品",
+            color=discord.Color.orange()
+        )
+        staff_embed.add_field(name="📋 訂單號", value=order_number, inline=True)
+        staff_embed.add_field(name="👤 用戶", value=f"<@{user_id}>", inline=True)
+        staff_embed.add_field(name="📦 商品", value=self.item_name, inline=True)
+        staff_embed.add_field(name="💰 金額", value=f"${self.price}", inline=True)
+        staff_embed.add_field(name="📁 分類", value=self.category, inline=True)
+        staff_embed.add_field(name="⏰ 時間", value=datetime.now().strftime("%Y-%m-%d %H:%M:%S"), inline=True)
+        staff_embed.add_field(name="📝 用戶備註", value=note, inline=False)
+        staff_embed.set_footer(text=f"使用 /完成訂單 {order_number} 標記完成")
+        
+        # 嘗試在指定頻道發送
+        if NOTIFICATION_CHANNEL_ID:
+            try:
+                channel = bot.get_channel(NOTIFICATION_CHANNEL_ID)
+                if channel:
+                    # 如果有設置對應的工作人員角色，就 @他們
+                    role_id = STAFF_ROLES.get(self.category)
+                    mention = f"<@&{role_id}>" if role_id else "@工作人員"
+                    await channel.send(content=mention, embed=staff_embed)
+                    return
+            except Exception as e:
+                print(f"發送通知失敗: {e}")
+        
+        # 如果沒有設置通知頻道，就在當前頻道發送
+        try:
+            await interaction.channel.send(embed=staff_embed)
+        except:
+            pass
+
+@bot.tree.command(name="我的訂單", description="查看你的購買紀錄")
+async def my_orders(interaction: discord.Interaction):
+    """查看訂單指令"""
+    user_id = interaction.user.id
+    orders = get_user_orders(user_id, 10)
+    
+    if not orders:
+        embed = discord.Embed(
+            title="📦 我的訂單",
+            description="你還沒有任何訂單",
+            color=discord.Color.grey()
+        )
+        await interaction.response.send_message(embed=embed)
+        return
+    
+    embed = discord.Embed(
+        title="📦 我的訂單（最近10筆）",
+        color=discord.Color.blue()
+    )
+    
+    for order_number, item_name, total_price, status, created_at in orders:
+        status_emoji = "✅" if status == "completed" else "⏳"
+        status_text = "已完成" if status == "completed" else "處理中"
+        
+        embed.add_field(
+            name=f"{status_emoji} {order_number}",
+            value=f"商品: {item_name}\n金額: ${total_price}\n狀態: {status_text}\n時間: {created_at}",
+            inline=False
+        )
+    
+    embed.set_footer(text=f"用戶: {interaction.user.name}")
+    await interaction.response.send_message(embed=embed)
+
 @bot.tree.command(name="我要儲值", description="申請儲值並查看轉帳資訊")
 async def deposit_request(interaction: discord.Interaction):
     """儲值申請指令"""
@@ -378,7 +836,6 @@ async def deposit_request(interaction: discord.Interaction):
         await interaction.response.send_message(embed=embed, ephemeral=True)
         return
     
-    # 創建儲值方案選單
     embed = discord.Embed(
         title="💳 儲值系統",
         description="請選擇儲值方案",
@@ -406,16 +863,14 @@ async def deposit_request(interaction: discord.Interaction):
         inline=False
     )
     
-    # 創建按鈕
     view = DepositView()
     await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
-# 儲值選擇按鈕視圖
+# 儲值選擇按鈕視圖（保留原有功能）
 class DepositView(discord.ui.View):
     def __init__(self):
-        super().__init__(timeout=300)  # 5分鐘超時
+        super().__init__(timeout=300)
         
-        # 為每個儲值方案創建按鈕
         for amount, points in DEPOSIT_PLANS.items():
             button = discord.ui.Button(
                 label=f"${amount} → {points}點",
@@ -427,7 +882,6 @@ class DepositView(discord.ui.View):
     
     def create_callback(self, amount: int, points: int):
         async def button_callback(interaction: discord.Interaction):
-            # 顯示轉帳資訊
             embed = discord.Embed(
                 title="💰 轉帳資訊",
                 description=f"請轉帳 **${amount}** 到以下帳戶",
@@ -449,26 +903,22 @@ class DepositView(discord.ui.View):
             
             embed.set_footer(text="請在30分鐘內完成轉帳並上傳截圖")
             
-            # 創建上傳截圖按鈕
             upload_view = UploadView(amount, points)
             await interaction.response.edit_message(embed=embed, view=upload_view)
         
         return button_callback
 
-# 上傳截圖視圖
 class UploadView(discord.ui.View):
     def __init__(self, amount: int, points: int):
-        super().__init__(timeout=1800)  # 30分鐘超時
+        super().__init__(timeout=1800)
         self.amount = amount
         self.points = points
     
     @discord.ui.button(label="📸 上傳付款截圖", style=discord.ButtonStyle.success)
     async def upload_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # 創建模態對話框請求截圖
         modal = ScreenshotModal(self.amount, self.points)
         await interaction.response.send_modal(modal)
 
-# 截圖上傳模態框
 class ScreenshotModal(discord.ui.Modal, title="上傳付款截圖"):
     def __init__(self, amount: int, points: int):
         super().__init__()
@@ -496,13 +946,11 @@ class ScreenshotModal(discord.ui.Modal, title="上傳付款截圖"):
         username = interaction.user.name
         screenshot = self.screenshot_url.value
         
-        # 創建儲值申請
         request_id = create_deposit_request(
             user_id, username, self.amount, self.points, screenshot
         )
         
         if request_id:
-            # 通知用戶
             user_embed = discord.Embed(
                 title="✅ 儲值申請已提交",
                 description="你的儲值申請已送出，請等待管理員審核",
@@ -514,32 +962,6 @@ class ScreenshotModal(discord.ui.Modal, title="上傳付款截圖"):
             user_embed.set_footer(text="通常在 1-24 小時內完成審核")
             
             await interaction.response.send_message(embed=user_embed, ephemeral=True)
-            
-            # 通知管理員頻道（可選）
-            # 找到有管理員權限的頻道發送通知
-            for channel in interaction.guild.text_channels:
-                if channel.permissions_for(interaction.guild.me).send_messages:
-                    admin_embed = discord.Embed(
-                        title="🔔 新的儲值申請",
-                        description=f"用戶 {username} 提交了儲值申請",
-                        color=discord.Color.orange()
-                    )
-                    admin_embed.add_field(name="申請編號", value=f"#{request_id}", inline=True)
-                    admin_embed.add_field(name="用戶", value=f"<@{user_id}>", inline=True)
-                    admin_embed.add_field(name="金額", value=f"${self.amount}", inline=True)
-                    admin_embed.add_field(name="點數", value=f"{self.points} 點", inline=True)
-                    admin_embed.add_field(name="截圖", value=screenshot, inline=False)
-                    
-                    if self.note.value:
-                        admin_embed.add_field(name="備註", value=self.note.value, inline=False)
-                    
-                    admin_embed.set_footer(text="使用 /審核儲值 查看所有待審核申請")
-                    
-                    try:
-                        await channel.send(embed=admin_embed)
-                        break  # 只發送到第一個可用頻道
-                    except:
-                        continue
         else:
             error_embed = discord.Embed(
                 title="❌ 提交失敗",
@@ -615,6 +1037,98 @@ async def deposits_history(interaction: discord.Interaction):
 
 # ============ 管理員指令 ============
 
+@bot.tree.command(name="查看訂單", description="[管理員] 查看所有待處理訂單")
+async def view_orders(interaction: discord.Interaction):
+    """查看訂單指令"""
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("❌ 此指令僅限管理員使用", ephemeral=True)
+        return
+    
+    orders = get_pending_orders()
+    
+    if not orders:
+        embed = discord.Embed(
+            title="📦 待處理訂單",
+            description="目前沒有待處理的訂單",
+            color=discord.Color.grey()
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+    
+    embed = discord.Embed(
+        title="📦 待處理訂單",
+        description=f"共有 {len(orders)} 筆待處理訂單",
+        color=discord.Color.orange()
+    )
+    
+    for order_number, user_id, username, item_name, item_price, quantity, total_price, note, created_at in orders:
+        embed.add_field(
+            name=f"訂單 {order_number}",
+            value=(
+                f"👤 用戶: <@{user_id}> ({username})\n"
+                f"📦 商品: {item_name}\n"
+                f"💰 金額: ${total_price}\n"
+                f"📝 備註: {note}\n"
+                f"⏰ 時間: {created_at}\n"
+                f"━━━━━━━━━━━━━━━━"
+            ),
+            inline=False
+        )
+    
+    embed.set_footer(text="使用 /完成訂單 [訂單號] 標記完成")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="完成訂單", description="[管理員] 標記訂單為已完成")
+@app_commands.describe(訂單號="要完成的訂單號")
+async def complete_order_cmd(interaction: discord.Interaction, 訂單號: str):
+    """完成訂單指令"""
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("❌ 此指令僅限管理員使用", ephemeral=True)
+        return
+    
+    order_info = get_order(訂單號)
+    if not order_info:
+        await interaction.response.send_message("❌ 找不到此訂單", ephemeral=True)
+        return
+    
+    order_number, user_id, username, item_name, item_price, quantity, total_price, status, note, created_at = order_info
+    
+    if status == 'completed':
+        await interaction.response.send_message("⚠️ 此訂單已完成", ephemeral=True)
+        return
+    
+    success = complete_order(訂單號, interaction.user.id)
+    
+    if success:
+        embed = discord.Embed(
+            title="✅ 訂單已完成",
+            color=discord.Color.green()
+        )
+        embed.add_field(name="訂單號", value=訂單號, inline=True)
+        embed.add_field(name="用戶", value=f"<@{user_id}>", inline=True)
+        embed.add_field(name="商品", value=item_name, inline=True)
+        embed.set_footer(text=f"完成者: {interaction.user.name}")
+        
+        await interaction.response.send_message(embed=embed)
+        
+        # 通知用戶
+        try:
+            user = await bot.fetch_user(user_id)
+            user_embed = discord.Embed(
+                title="✅ 訂單已完成",
+                description=f"你的訂單 {訂單號} 已經完成！",
+                color=discord.Color.green()
+            )
+            user_embed.add_field(name="商品", value=item_name, inline=True)
+            user_embed.add_field(name="金額", value=f"${total_price}", inline=True)
+            user_embed.set_footer(text="感謝你的購買！")
+            
+            await user.send(embed=user_embed)
+        except:
+            pass
+    else:
+        await interaction.response.send_message("❌ 操作失敗", ephemeral=True)
+
 @bot.tree.command(name="審核儲值", description="[管理員] 查看所有待審核的儲值申請")
 async def review_deposits(interaction: discord.Interaction):
     """審核儲值指令"""
@@ -664,7 +1178,6 @@ async def approve_deposit(interaction: discord.Interaction, 申請編號: int):
         await interaction.response.send_message("❌ 此指令僅限管理員使用", ephemeral=True)
         return
     
-    # 獲取申請資訊
     request_info = get_deposit_request(申請編號)
     if not request_info:
         await interaction.response.send_message("❌ 找不到此申請", ephemeral=True)
@@ -676,11 +1189,9 @@ async def approve_deposit(interaction: discord.Interaction, 申請編號: int):
         await interaction.response.send_message(f"❌ 此申請已處理（狀態: {status}）", ephemeral=True)
         return
     
-    # 批准申請
     success, message = approve_deposit_request(申請編號, interaction.user.id)
     
     if success:
-        # 通知管理員
         admin_embed = discord.Embed(
             title="✅ 儲值已通過",
             color=discord.Color.green()
@@ -692,7 +1203,6 @@ async def approve_deposit(interaction: discord.Interaction, 申請編號: int):
         
         await interaction.response.send_message(embed=admin_embed)
         
-        # 通知用戶（嘗試發送私訊）
         try:
             user = await bot.fetch_user(user_id)
             user_embed = discord.Embed(
@@ -707,7 +1217,7 @@ async def approve_deposit(interaction: discord.Interaction, 申請編號: int):
             
             await user.send(embed=user_embed)
         except:
-            pass  # 如果無法發送私訊就忽略
+            pass
     else:
         await interaction.response.send_message(f"❌ 處理失敗: {message}", ephemeral=True)
 
@@ -719,7 +1229,6 @@ async def reject_deposit(interaction: discord.Interaction, 申請編號: int, �
         await interaction.response.send_message("❌ 此指令僅限管理員使用", ephemeral=True)
         return
     
-    # 獲取申請資訊
     request_info = get_deposit_request(申請編號)
     if not request_info:
         await interaction.response.send_message("❌ 找不到此申請", ephemeral=True)
@@ -731,11 +1240,9 @@ async def reject_deposit(interaction: discord.Interaction, 申請編號: int, �
         await interaction.response.send_message(f"❌ 此申請已處理（狀態: {status}）", ephemeral=True)
         return
     
-    # 拒絕申請
     success = reject_deposit_request(申請編號, interaction.user.id, 原因)
     
     if success:
-        # 通知管理員
         admin_embed = discord.Embed(
             title="❌ 儲值已拒絕",
             color=discord.Color.red()
@@ -747,7 +1254,6 @@ async def reject_deposit(interaction: discord.Interaction, 申請編號: int, �
         
         await interaction.response.send_message(embed=admin_embed)
         
-        # 通知用戶
         try:
             user = await bot.fetch_user(user_id)
             user_embed = discord.Embed(
