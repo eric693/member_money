@@ -8,6 +8,9 @@ from typing import Optional
 from dotenv import load_dotenv
 import calendar
 
+# ============ 導入安全系統 ============
+from security_system import SecurityManager
+
 # 載入 .env 文件
 load_dotenv()
 
@@ -89,6 +92,31 @@ intents.message_content = True
 intents.members = True
 
 bot = commands.Bot(command_prefix='/', intents=intents)
+
+# ============ 初始化安全系統 ============
+security_manager = SecurityManager()
+
+# ============ 安全檢查裝飾器 ============
+async def check_blacklist(interaction: discord.Interaction) -> bool:
+    """檢查用戶是否在黑名單"""
+    user_id = interaction.user.id
+    is_banned, reason = security_manager.is_blacklisted(user_id)
+    
+    if is_banned:
+        embed = discord.Embed(
+            title="🚫 帳號已被封禁",
+            description=f"你的帳號因以下原因被封禁：\n**{reason}**",
+            color=discord.Color.red()
+        )
+        embed.add_field(
+            name="申訴方式",
+            value="如有疑問，請聯繫管理員",
+            inline=False
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return False
+    
+    return True
 
 # 資料庫初始化
 def init_database():
@@ -628,6 +656,10 @@ async def on_ready():
 
 @bot.tree.command(name="註冊", description="創建你的個人錢包")
 async def register(interaction: discord.Interaction):
+    # 檢查黑名單
+    if not await check_blacklist(interaction):
+        return
+    
     user_id = interaction.user.id
     username = interaction.user.name
     
@@ -671,7 +703,12 @@ async def balance(interaction: discord.Interaction):
 
 @bot.tree.command(name="商城", description="查看商城商品列表")
 async def shop(interaction: discord.Interaction):
+    # 檢查黑名單
+    if not await check_blacklist(interaction):
+        return
+    
     user_id = interaction.user.id
+    username = interaction.user.name
     balance = get_balance(user_id)
     
     if balance is None:
@@ -682,6 +719,29 @@ async def shop(interaction: discord.Interaction):
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
         return
+    
+    # 檢測可疑操作
+    warnings = security_manager.detect_suspicious_activity(user_id, username)
+    
+    if warnings:
+        # 有可疑操作，發送警告給管理員
+        if NOTIFICATION_CHANNEL_ID:
+            try:
+                channel = bot.get_channel(NOTIFICATION_CHANNEL_ID)
+                if channel:
+                    alert_embed = discord.Embed(
+                        title="⚠️ 可疑操作警報",
+                        description=f"用戶 {username} (ID: {user_id}) 行為異常",
+                        color=discord.Color.orange()
+                    )
+                    alert_embed.add_field(
+                        name="異常行為",
+                        value="\n".join([f"• {w}" for w in warnings]),
+                        inline=False
+                    )
+                    await channel.send(embed=alert_embed)
+            except:
+                pass
     
     items = get_shop_items()
     
@@ -918,6 +978,54 @@ async def my_orders(interaction: discord.Interaction):
 @bot.tree.command(name="我要儲值", description="申請儲值並查看轉帳資訊")
 async def deposit_request(interaction: discord.Interaction):
     user_id = interaction.user.id
+    username = interaction.user.name
+    
+    # 檢查黑名單
+    if not await check_blacklist(interaction):
+        return
+    
+    # 檢查儲值限制
+    can_deposit, count, amount = security_manager.check_deposit_limit(user_id)
+    
+    if not can_deposit:
+        is_new = security_manager._is_new_account(user_id)
+        
+        embed = discord.Embed(
+            title="❌ 儲值限制",
+            description="你今日已達儲值上限",
+            color=discord.Color.red()
+        )
+        
+        if is_new:
+            embed.add_field(
+                name="新帳號保護",
+                value="新註冊帳號每天限制儲值 **1次**\n這是為了保護你的帳號安全",
+                inline=False
+            )
+        else:
+            embed.add_field(
+                name="今日儲值記錄",
+                value=f"次數: {count}/3\n金額: ${amount}/10000",
+                inline=False
+            )
+        
+        embed.add_field(
+            name="💡 提示",
+            value="請明天再試，或聯繫管理員",
+            inline=False
+        )
+        
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        
+        # 記錄可疑操作
+        security_manager.log_suspicious_action(
+            user_id, username,
+            'DEPOSIT_LIMIT_EXCEEDED',
+            f"嘗試超限儲值（今日第{count+1}次）",
+            ""
+        )
+        return
+    
     balance = get_balance(user_id)
     
     if balance is None:
@@ -1037,6 +1145,32 @@ class ScreenshotModal(discord.ui.Modal, title="上傳付款截圖"):
         user_id = interaction.user.id
         username = interaction.user.name
         screenshot = self.screenshot_url.value
+        
+        # 檢查盜刷
+        if security_manager.check_stolen_card(user_id, username, self.amount):
+            # 發送警告給管理員
+            if NOTIFICATION_CHANNEL_ID:
+                try:
+                    channel = bot.get_channel(NOTIFICATION_CHANNEL_ID)
+                    if channel:
+                        alert_embed = discord.Embed(
+                            title="🚨 疑似盜刷警報",
+                            description=f"用戶 {username} (ID: {user_id}) 的儲值行為異常",
+                            color=discord.Color.red()
+                        )
+                        alert_embed.add_field(name="儲值金額", value=f"${self.amount}", inline=True)
+                        alert_embed.add_field(name="風險等級", value="🚨 高", inline=True)
+                        alert_embed.add_field(
+                            name="建議操作",
+                            value="1. 仔細審核此儲值申請\n2. 查看用戶歷史紀錄\n3. 必要時聯繫用戶確認",
+                            inline=False
+                        )
+                        await channel.send(content="@管理員", embed=alert_embed)
+                except:
+                    pass
+        
+        # 記錄儲值嘗試
+        security_manager.record_deposit_attempt(user_id, self.amount)
         
         request_id = create_deposit_request(
             user_id, username, self.amount, self.points, screenshot
@@ -1705,6 +1839,260 @@ async def leaderboard(interaction: discord.Interaction):
         )
     
     await interaction.response.send_message(embed=embed)
+
+# ============ 安全管理指令 ============
+
+@bot.tree.command(name="封禁用戶", description="[管理員] 將用戶加入黑名單")
+@app_commands.describe(
+    用戶="要封禁的用戶",
+    原因="封禁原因",
+    天數="封禁天數（留空=永久）",
+    備註="備註說明（選填）"
+)
+async def ban_user(interaction: discord.Interaction, 用戶: discord.Member, 
+                   原因: str, 天數: Optional[int] = None, 備註: str = ""):
+    """封禁用戶指令"""
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("❌ 此指令僅限管理員使用", ephemeral=True)
+        return
+    
+    success = security_manager.add_to_blacklist(
+        用戶.id, 用戶.name, 原因, interaction.user.id, 天數, 備註
+    )
+    
+    if success:
+        duration_text = f"{天數} 天" if 天數 else "永久"
+        
+        embed = discord.Embed(
+            title="✅ 封禁成功",
+            description=f"{用戶.mention} 已被加入黑名單",
+            color=discord.Color.red()
+        )
+        embed.add_field(name="封禁原因", value=原因, inline=False)
+        embed.add_field(name="封禁期限", value=duration_text, inline=True)
+        embed.add_field(name="執行者", value=interaction.user.mention, inline=True)
+        if 備註:
+            embed.add_field(name="備註", value=備註, inline=False)
+        
+        await interaction.response.send_message(embed=embed)
+        
+        # 通知被封禁的用戶
+        try:
+            user_embed = discord.Embed(
+                title="🚫 帳號已被封禁",
+                description=f"你的帳號已被封禁 {duration_text}",
+                color=discord.Color.red()
+            )
+            user_embed.add_field(name="封禁原因", value=原因, inline=False)
+            user_embed.add_field(name="申訴方式", value="請聯繫伺服器管理員", inline=False)
+            
+            await 用戶.send(embed=user_embed)
+        except:
+            pass
+    else:
+        await interaction.response.send_message("❌ 封禁失敗", ephemeral=True)
+
+@bot.tree.command(name="解封用戶", description="[管理員] 將用戶移出黑名單")
+@app_commands.describe(用戶="要解封的用戶")
+async def unban_user(interaction: discord.Interaction, 用戶: discord.Member):
+    """解封用戶指令"""
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("❌ 此指令僅限管理員使用", ephemeral=True)
+        return
+    
+    success = security_manager.remove_from_blacklist(用戶.id)
+    
+    if success:
+        embed = discord.Embed(
+            title="✅ 解封成功",
+            description=f"{用戶.mention} 已被移出黑名單",
+            color=discord.Color.green()
+        )
+        embed.add_field(name="執行者", value=interaction.user.mention, inline=True)
+        
+        await interaction.response.send_message(embed=embed)
+        
+        # 通知被解封的用戶
+        try:
+            user_embed = discord.Embed(
+                title="✅ 帳號已解封",
+                description="你的帳號已被解除封禁，現在可以正常使用了",
+                color=discord.Color.green()
+            )
+            await 用戶.send(embed=user_embed)
+        except:
+            pass
+    else:
+        await interaction.response.send_message("❌ 解封失敗或該用戶不在黑名單中", ephemeral=True)
+
+@bot.tree.command(name="檢查用戶", description="[管理員] 檢查用戶狀態和可疑操作")
+@app_commands.describe(用戶="要檢查的用戶")
+async def check_user_security(interaction: discord.Interaction, 用戶: discord.Member):
+    """檢查用戶安全狀態"""
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("❌ 此指令僅限管理員使用", ephemeral=True)
+        return
+    
+    # 檢查黑名單
+    is_banned, ban_reason = security_manager.is_blacklisted(用戶.id)
+    
+    # 檢查可疑操作
+    warnings = security_manager.detect_suspicious_activity(用戶.id, 用戶.name)
+    
+    # 檢查儲值限制
+    can_deposit, deposit_count, deposit_amount = security_manager.check_deposit_limit(用戶.id)
+    
+    # 檢查是否為新帳號
+    is_new = security_manager._is_new_account(用戶.id)
+    
+    embed = discord.Embed(
+        title=f"🔍 用戶安全檢查 - {用戶.name}",
+        color=discord.Color.red() if (is_banned or warnings) else discord.Color.green()
+    )
+    
+    # 基本資訊
+    embed.add_field(name="用戶ID", value=用戶.id, inline=True)
+    embed.add_field(name="帳號類型", value="🆕 新帳號" if is_new else "✅ 正常帳號", inline=True)
+    embed.add_field(name="黑名單狀態", value="🚫 已封禁" if is_banned else "✅ 正常", inline=True)
+    
+    if is_banned:
+        embed.add_field(name="封禁原因", value=ban_reason, inline=False)
+    
+    # 今日儲值
+    embed.add_field(name="今日儲值次數", value=f"{deposit_count} 次", inline=True)
+    embed.add_field(name="今日儲值金額", value=f"${deposit_amount:.2f}", inline=True)
+    embed.add_field(name="可否儲值", value="✅ 是" if can_deposit else "❌ 否", inline=True)
+    
+    # 可疑操作
+    if warnings:
+        embed.add_field(
+            name="⚠️ 可疑操作",
+            value="\n".join([f"• {w}" for w in warnings]),
+            inline=False
+        )
+        embed.color = discord.Color.orange()
+    else:
+        embed.add_field(name="可疑操作", value="✅ 無異常", inline=False)
+    
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="查看黑名單", description="[管理員] 查看所有黑名單用戶")
+async def view_blacklist(interaction: discord.Interaction):
+    """查看黑名單指令"""
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("❌ 此指令僅限管理員使用", ephemeral=True)
+        return
+    
+    blacklist = security_manager.get_blacklist(20)
+    
+    if not blacklist:
+        embed = discord.Embed(
+            title="📋 黑名單",
+            description="目前沒有被封禁的用戶",
+            color=discord.Color.green()
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+    
+    embed = discord.Embed(
+        title="📋 黑名單列表",
+        description=f"共 {len(blacklist)} 位用戶被封禁",
+        color=discord.Color.red()
+    )
+    
+    for i, user in enumerate(blacklist[:10], 1):  # 只顯示前10個
+        embed.add_field(
+            name=f"{i}. {user['用戶名']} (ID: {user['用戶ID']})",
+            value=(
+                f"原因: {user['封禁原因']}\n"
+                f"時間: {user['封禁時間']}\n"
+                f"期限: {user['解封時間']}"
+            ),
+            inline=False
+        )
+    
+    if len(blacklist) > 10:
+        embed.set_footer(text=f"僅顯示前10位，共 {len(blacklist)} 位")
+    
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="查看風險事件", description="[管理員] 查看未處理的風險事件")
+async def view_risk_events(interaction: discord.Interaction):
+    """查看風險事件指令"""
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("❌ 此指令僅限管理員使用", ephemeral=True)
+        return
+    
+    events = security_manager.get_risk_events(handled=False, limit=20)
+    
+    if not events:
+        embed = discord.Embed(
+            title="✅ 風險事件",
+            description="目前沒有未處理的風險事件",
+            color=discord.Color.green()
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+    
+    embed = discord.Embed(
+        title="⚠️ 未處理風險事件",
+        description=f"共 {len(events)} 件待處理",
+        color=discord.Color.orange()
+    )
+    
+    for i, event in enumerate(events[:10], 1):
+        severity_emoji = {
+            'LOW': '🟢',
+            'MEDIUM': '🟡',
+            'HIGH': '🟠',
+            'CRITICAL': '🔴'
+        }.get(event['嚴重程度'], '⚪')
+        
+        embed.add_field(
+            name=f"{i}. {event['用戶名']} (ID: {event['用戶ID']})",
+            value=(
+                f"{severity_emoji} {event['嚴重程度']}\n"
+                f"類型: {event['事件類型']}\n"
+                f"描述: {event['描述']}\n"
+                f"時間: {event['發生時間']}"
+            ),
+            inline=False
+        )
+    
+    if len(events) > 10:
+        embed.set_footer(text=f"僅顯示前10件，共 {len(events)} 件")
+    
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="自動風控", description="[管理員] 執行自動風險處理")
+async def auto_risk_control(interaction: discord.Interaction):
+    """自動風控指令"""
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("❌ 此指令僅限管理員使用", ephemeral=True)
+        return
+    
+    await interaction.response.defer(ephemeral=True)
+    
+    results = security_manager.auto_handle_risks()
+    
+    embed = discord.Embed(
+        title="🤖 自動風控執行完成",
+        color=discord.Color.blue()
+    )
+    
+    embed.add_field(name="檢測事件", value=f"{results['events_logged']} 件", inline=True)
+    embed.add_field(name="自動封禁", value=f"{len(results['auto_banned'])} 人", inline=True)
+    
+    if results['auto_banned']:
+        ban_list = "\n".join([
+            f"• {b['username']} (ID: {b['user_id']})\n  原因: {b['reason']}"
+            for b in results['auto_banned'][:5]
+        ])
+        embed.add_field(name="封禁列表", value=ban_list, inline=False)
+    
+    embed.set_footer(text=f"執行者: {interaction.user.name}")
+    
+    await interaction.followup.send(embed=embed, ephemeral=True)
 
 if __name__ == "__main__":
     TOKEN = os.getenv('DISCORD_TOKEN')
